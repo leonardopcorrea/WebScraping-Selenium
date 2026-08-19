@@ -1,193 +1,151 @@
-# Web Scraping Automation for extracting table data from a paginated website
+# Web Scraping — Hockey Teams Table
 
-This Python code uses the Selenium library to perform web scraping of a table on a paginated website. It extracts data from the search results table on the website using the login credentials provided by the user (if necessary). Then, it saves the extracted data to an Excel file.
+![Tests](https://github.com/leonardopcorrea/WebScraping-Selenium/actions/workflows/test.yml/badge.svg)
 
+HTTP scraper for the paginated hockey teams table at [scrapethissite.com/pages/forms](https://www.scrapethissite.com/pages/forms/). It fetches static HTML with **httpx**, parses rows with **selectolax**, validates each record with **Pydantic**, and writes results to **Excel**, **CSV**, or **JSON**.
 
+The default path is **httpx only** — no browser is required for the public table. Optional **Playwright** is available solely for JavaScript-heavy login when `AUTH_MODE=browser` (see [Optional authentication](#optional-authentication)).
 
-## How the code works
+## Quick start
 
-1. Importing the necessary libraries:
+**Requirements:** Python 3.11+
 
-```python
-from selenium import webdriver
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.by import By
-import pandas as pd
-import time
+```bash
+cp .env.example .env
+py -3 -m pip install -r requirements.txt
+py -3 -m scraper
 ```
 
-These are the necessary libraries for automating web scraping. The `webdriver` library is the one that allows the script to control the web browser. The `keys` and `by` are submodules of `webdriver` that assist in interacting with the page. `Pandas` is a library for data manipulation and analysis in Python. `Time` is used to pause between requests.
+On Windows, if `python` is not on your PATH, use `py -3` instead of `python`.
 
+For a short smoke test, set `MAX_PAGES=2` in `.env` before running.
 
+## Configuration (`.env`)
 
-2. Definition of the WebDriver:
+Copy `.env.example` to `.env` and adjust as needed:
 
-```python
-driver = webdriver.Chrome()
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `BASE_URL` | `https://www.scrapethissite.com/pages/forms/` | Listing URL (no query string) |
+| `PAGE_SIZE` | `25` | Rows per page (`per_page` query param) |
+| `MAX_PAGES` | `0` | Page cap; `0` = scrape until pagination ends |
+| `OUTPUT_PATH` | `output/hockey_teams.xlsx` | Output file path |
+| `REQUEST_TIMEOUT_S` | `20` | HTTP timeout per request |
+| `MAX_RETRIES` | `4` | Retries on timeout, transport errors, 408/425/429/5xx |
+| `MIN_DELAY_S` / `MAX_DELAY_S` | `0.4` / `1.2` | Random pause before each page |
+| `USER_AGENT` | *(Chrome-like default)* | Optional custom User-Agent |
+| `PROXY_URL` | *(empty)* | Optional HTTP proxy |
+| `LOG_LEVEL` | `INFO` | Logging verbosity |
+
+### Optional authentication
+
+Public scrape is the default (`AUTH_MODE=off`). Enable login only when needed; keep credentials in `.env` (never in code or git).
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `AUTH_MODE` | `off` | `off`, `cookie`, `form`, or `browser` |
+| `LOGIN_URL` | *(empty)* | Required for `form` / `browser` |
+| `USERNAME` / `PASSWORD` | *(empty)* | Required for `form` / `browser` |
+| `COOKIE_HEADER` | *(empty)* | Raw `Cookie` header for `cookie` mode |
+| `AUTH_BEARER` | *(empty)* | Bearer token for `cookie` mode |
+| `LOGIN_*_SELECTOR` | `#username`, `#password`, `button[type="submit"]` | CSS selectors for `browser` (and form field lookup) |
+| `LOGIN_SUCCESS_URL` | *(empty)* | Optional URL substring to confirm login |
+
+- **cookie** — injects `Cookie` / `Authorization` on the shared `httpx.Client`.
+- **form** — GET login page, extract hidden/CSRF fields, POST credentials; cookies stay in the client jar.
+- **browser** — Playwright fills the form and exports cookies to httpx. Install with `pip install -r requirements-browser.txt`, then run `playwright install chromium`.
+
+Failed login (401/403, or login form still visible on the session probe) aborts **before** pagination starts.
+
+## CLI
+
+Command-line flags override `.env` values for a single run:
+
+```bash
+py -3 -m scraper --max-pages 2
+py -3 -m scraper --output output/teams.csv --format csv
+py -3 -m scraper --output output/teams.json --format json
 ```
 
-Here, the WebDriver that will be used to control the Google Chrome browser is defined.
+| Flag | Description |
+| ---- | ----------- |
+| `--max-pages N` | Stop after N pages (overrides `MAX_PAGES`) |
+| `--output PATH` | Output file path (overrides `OUTPUT_PATH`) |
+| `--format {xlsx,csv,json}` | Output format; inferred from `--output` extension when omitted |
 
+## How it works
 
-
-3. Definition of the website and login credentials. Change the "YOUR USERNAME" and "YOUR PASSWORD" fields to the necessary credentials if the website requests them:
-
-```python
-site = "https://www.scrapethissite.com/pages/forms/"
-#username = "YOUR USERNAME"
-#password = "YOUR PASSWORD"
+```
+.env / Settings → run() → authenticate (if AUTH_MODE != off) → polite delay → HttpFetcher GET
+  → parse_listing (CSS) → HockeyTeamRecord → output file
 ```
 
-In this part, the website to be accessed and the login credentials to be used are defined. In this case, the credentials are commented out because they were not used in the example.
+1. `python -m scraper` calls `run()` in `scraper/__main__.py`.
+2. `Settings` loads configuration from `.env`.
+3. When `AUTH_MODE` is not `off`, `authenticate()` establishes a session on the shared `httpx.Client` (cookie injection, form POST, or Playwright login).
+4. `HttpFetcher` opens a reusable `httpx.Client` with browser-like headers, builds URLs `?page_num=N&per_page=25`, and retries transient failures with exponential backoff. HTTP 429 respects `Retry-After`.
+5. Before each page, a random delay runs between `MIN_DELAY_S` and `MAX_DELAY_S`.
+6. `parse_listing` selects `table.table tr.team` and reads cell classes (`td.name`, `td.year`, etc.). Missing table → error; no team rows → empty page (end of pagination).
+7. Each row becomes a `HockeyTeamRecord`. Invalid rows are logged and skipped; they do not abort the page.
+8. Fetch/parse failures **skip the page**; exhausted 429 **stops the job**. Two consecutive empty pages (or the first empty page when `MAX_PAGES=0`) stop pagination.
+9. Results are written to the configured output file with source URL and page number columns (Excel/CSV) or full record fields (JSON).
 
+Logs go to stderr with `url=` and `page=` context.
 
+## Output columns
 
-4. Opening the browser and accessing the site for login:
+Excel and CSV include:
 
-```python
-#driver.get(site)
+`Team Name`, `Year`, `Wins`, `Losses`, `OT Losses`, `Win %`, `Goals For (GF)`, `Goals Against (GA)`, `+ / -`, `Source URL`, `Page`
+
+JSON exports a list of validated record objects (field names in snake_case).
+
+## What this project does **not** do
+
+By design, the scraper is scoped to one static table on one site:
+
+- No CAPTCHA handling or aggressive anti-bot evasion
+- No proxy rotation
+- No multi-site or plug-in spider architecture
+- No database sink or resume/checkpoint support
+
+Use it for learning and for sites that expose data as plain HTML. Do not point it at production sites with restrictive terms of service or heavy bot protection.
+
+## Development
+
+Install test dependencies and run offline tests (parser, auth, HTTP retry logic — no live network):
+
+```bash
+py -3 -m pip install -r requirements-dev.txt
+py -3 -m pytest
 ```
 
-This line of code is commented out because it is not necessary to log in to the site in question.
+Fixtures live under `tests/fixtures/` (sample HTML) and use `httpx.MockTransport` for retry and auth behavior.
 
+## Project layout
 
-
-5. Identification of the login and password fields of the website and insertion of the credentials declared above:
-
-```python
-#driver.find_element(By.NAME, "login").send_keys(username)
-#driver.find_element(By.NAME, "password").send_keys(password, Keys.ENTER)
 ```
-
-These lines of code are also commented out because they are not necessary in the example.
-
-
-
-6. Wait for the page to load:
-
-```python
-#time.sleep(1)
-```
-
-This line of code causes the script to wait for 1 second before continuing execution.
-
-
-
-7. Definition of the number of pages. Change the value of X to the number of pages you want to go through:
-
-```python
-num_pages = X
-```
-
-This variable defines the number of pages that will be traversed.
-
-
-
-8. Initialization of the list to store the data:
-
-```python
-data = []
-```
-
-This list will be used to store the data extracted from the table.
-
-
-
-9. Initialization of the timer:
-
-```python
-start_time = time.time()
-```
-
-This line of code records the start time of the script's execution.
-
-
-
-10. Loop to access each page and extract data:
-
-```python
-for pagina in range(1, num_pages + 1):
-```
-
-This loop traverses each page of the table and extracts the data.
-
-
-
-11. Error handling:
-
-```python
-try:
-	...
-except Exception as e: 
-    print(f"Erro on page {pagina}: {str(e)}")
-    break
-```
-
-
-
-12. Next, a loop is started to access each page and extract the data. The number of pages to be accessed is defined previously in the `num_pages` variable. The loop iterates through each page, accessing the corresponding URL, and then locates the table rows using the `driver.find_elements()` function, which finds all elements that match the specified xpath. The rows are iterated one by one, and the information contained in each column is extracted with the `cell.text` function, which returns the text contained in the cell.
-
-```python
-for page in range(1, num_pages + 1):
-    try:
-        # Access the page
-        url = f"{site}?page_num={page}"
-        driver.get(url)
-
-        # Wait for the page to load
-        time.sleep(1)
-
-        # Locate rows
-        rows = driver.find_elements(By.XPATH, '/html/body/div/section/div/table/tbody/tr')
-
-        # Loop through each row extracting its data
-        for num_pages in range(2, len(rows) + 1):
-            row_xpath = f'/html/body/div/section/div/table/tbody/tr[{num_pages}]'
-            cells = driver.find_elements(By.XPATH, row_xpath + '/td')
-            
-            # Save extracted data to respective variables
-            team_name, year, wins, losses, ot_losses, win_perc, goals_for, goals_against, more_less = [cell.text for cell in cells]
-
-            # Add data to the list
-            data.append([team_name, year, wins, losses, ot_losses, win_perc, goals_for, goals_against, more_less])
-    
-    # Finish error handling, save collected data and print the last extracted page
-    except Exception as e: 
-        print(f"Error on page {page}: {str(e)}")
-        break
-```
-
-
-
-13. After the data is collected, the total execution time of the script and the average time per loop are calculated. This information is printed on the screen using the `print()` function.
-
-```python
-# Calculate total execution time
-total_time = time.time() - start_time
-
-# Calculate average time per loop
-average_loop_time = total_time / num_pages
-
-# Print information
-print(f"Total execution time: {total_time:.2f} seconds")
-print(f"Average loop time: {average_loop_time:.2f} seconds")
-```
-
-
-
-14. Finally, the collected data is saved to an Excel file using the Pandas library's `to_excel()` function. The `DataFrame()` function is used to create a DataFrame object from the `data` list with named columns corresponding to the information extracted from the table. The file is saved with the name `data.xlsx` in the folder where the script is being executed.
-
-```python
-# Save data to an Excel file
-df = pd.DataFrame(data, columns=["Team Name", "Year", "Wins", "Losses", "OT Losses", "Win %", "Goals For (GF)", "Goals Against (GA)", "+ / -"])
-df.to_excel("data.xlsx", index=False)
-```
-
-
-
-15. Finally, the browser is closed with the `driver.quit()` function.
-
-```python
-# Close the browser
-driver.quit()
+scraper/
+  __main__.py      # CLI entry point and orchestration
+  auth.py          # Optional login (cookie / form / Playwright)
+  config.py        # Settings from environment
+  exceptions.py    # Domain-specific errors
+  fetcher.py       # HTTP client, retries, pagination URLs
+  logging_setup.py # Structured stderr logging
+  parser.py        # selectolax CSS extraction
+  models.py        # Pydantic record schema
+  storage.py       # Excel / CSV / JSON writers
+  stealth.py       # Headers and jitter delay
+tests/
+  conftest.py
+  fixtures/        # Offline HTML samples
+  test_auth.py
+  test_cli.py
+  test_fetcher.py
+  test_parser.py
+  test_storage.py
+requirements.txt           # Runtime dependencies (httpx path)
+requirements-dev.txt       # pytest and dev tools
+requirements-browser.txt   # Optional Playwright for AUTH_MODE=browser
+pyproject.toml             # Project metadata and pytest config
 ```

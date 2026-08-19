@@ -1,0 +1,13 @@
+[project]
+name = "hockey-table-scraper"
+version = "2.0.0"
+description = "HTTP scraper for the scrapethissite hockey teams table"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "MIT" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
